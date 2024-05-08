@@ -1,124 +1,189 @@
-import { WebSocket } from "ws";
-import { INIT_GAME, JOIN_GAME, MOVE } from "./messages";
-import { Game } from "./Game";
-import db from "./db"
+import { WebSocket } from 'ws';
+import {
+  GAME_OVER,
+  INIT_GAME,
+  JOIN_GAME,
+  MOVE,
+  OPPONENT_DISCONNECTED,
+  JOIN_ROOM,
+  GAME_JOINED,
+  GAME_NOT_FOUND,
+  GAME_ALERT,
+  GAME_ADDED,
+  GAME_ENDED,
+} from './messages';
+import { Game, isPromoting } from './Game';
+import { db } from './db';
+import { SocketManager, User } from './SocketManager';
+import { Square } from 'chess.js';
+import { GameStatus } from '@prisma/client';
 
 export class GameManager {
-    private games: Game[];
-    private pendingUser: WebSocket | null;
-    private users: WebSocket[];
+  private games: Game[];
+  private pendingGameId: string | null;
+  private users: User[];
 
-    constructor() {
-        this.games = [];
-        this.pendingUser = null;
-        this.users = [];
+  constructor() {
+    this.games = [];
+    this.pendingGameId = null;
+    this.users = [];
+  }
+
+  addUser(user: User) {
+    this.users.push(user);
+    this.addHandler(user);
+  }
+
+  removeUser(socket: WebSocket) {
+    const user = this.users.find((user) => user.socket === socket);
+    if (!user) {
+      console.error('User not found?');
+      return;
     }
+    this.users = this.users.filter((user) => user.socket !== socket);
+    SocketManager.getInstance().removeUser(user);
+  }
 
-    addUser(socket: WebSocket) {
-        this.users.push(socket);
-        this.addHandler(socket)
-    }
+  removeGame(gameId: string) {
+    this.games = this.games.filter((g) => g.gameId !== gameId);
+  }
 
-    removeUser(socket: WebSocket) {
-        this.users = this.users.filter(user => user !== socket);
-        const gameIndex = this.games.findIndex(game => game.player1 === socket || game.player2 === socket);
-        if (gameIndex !== -1) {
-            const game = this.games[gameIndex];
-            if (game.player1 === socket) {
-                game.player1 = null;
-                if (game.player2) {
-                    game.player2.send(JSON.stringify({ type: "OPPONENT_DISCONNECTED" }));
-                } else {
-                    this.games.splice(gameIndex, 1);
-                }
-            }
-
-            else if (game.player2 === socket) {
-                game.player2 = null;
-                if (game.player1) {
-                    game.player1.send(JSON.stringify({ type: "OPPONENT_DISCONNECTED" }));
-                } else {
-                    this.games.splice(gameIndex, 1);
-                }
-            }
+  private addHandler(user: User) {
+    user.socket.on('message', async (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type === INIT_GAME) {
+        if (this.pendingGameId) {
+          const game = this.games.find((x) => x.gameId === this.pendingGameId);
+          if (!game) {
+            console.error('Pending game not found?');
+            return;
+          }
+          if (user.userId === game.player1UserId) {
+            SocketManager.getInstance().broadcast(
+              game.gameId,
+              JSON.stringify({
+                type: GAME_ALERT,
+                payload: {
+                  message: 'Trying to Connect with yourself?',
+                },
+              }),
+            );
+            return;
+          }
+          SocketManager.getInstance().addUser(user, game.gameId);
+          await game?.updateSecondPlayer(user.userId);
+          this.pendingGameId = null;
+        } else {
+          const game = new Game(user.userId, null);
+          this.games.push(game);
+          this.pendingGameId = game.gameId;
+          SocketManager.getInstance().addUser(user, game.gameId);
+          SocketManager.getInstance().broadcast(
+            game.gameId,
+            JSON.stringify({
+              type: GAME_ADDED,
+            }),
+          );
         }
-    }
+      }
 
-    private addHandler(socket: WebSocket) {
-        socket.on("message", async (data) => {
-            const message = JSON.parse(data.toString());
-            if (message.type === INIT_GAME) {
+      if (message.type === MOVE) {
+        const gameId = message.payload.gameId;
+        const game = this.games.find((game) => game.gameId === gameId);
+        if (game) {
+          game.makeMove(user, message.payload.move);
+          if (game.result)  {
+            this.removeGame(game.gameId);
+          }
+        }
+      }
 
-                if (this.pendingUser) {
-                    const game = new Game(this.pendingUser, socket);
-                    await game.createGameHandler();
-                    this.games.push(game);
-                    this.pendingUser = null;
-                } else {
-                    this.pendingUser = socket;
-                }
+      if (message.type === JOIN_ROOM) {
+        const gameId = message.payload?.gameId;
+        if (!gameId) {
+          return;
+        }
+
+        let availableGame = this.games.find((game) => game.gameId === gameId);
+        const gameFromDb = await db.game.findUnique({
+          where: { id: gameId },
+          include: {
+            moves: {
+              orderBy: {
+                moveNumber: 'asc',
+              },
+            },
+            blackPlayer: true,
+            whitePlayer: true,
+          },
+        });
+
+        if (!gameFromDb) {
+          user.socket.send(
+            JSON.stringify({
+              type: GAME_NOT_FOUND,
+            }),
+          );
+          return;
+        }
+
+        if(gameFromDb.status !== GameStatus.IN_PROGRESS) {
+          user.socket.send(JSON.stringify({
+            type: GAME_ENDED,
+            payload: {
+              result: gameFromDb.result,
+              status: gameFromDb.status,
+              moves: gameFromDb.moves,
+              blackPlayer: {
+                id: gameFromDb.blackPlayer.id,
+                name: gameFromDb.blackPlayer.name,
+              },
+              whitePlayer: {
+                id: gameFromDb.whitePlayer.id,
+                name: gameFromDb.whitePlayer.name,
+              },
             }
+          }));
+          return;
+        }
 
-            if (message.type === MOVE) {
-                console.log("inside move")
-                const game = this.games.find(game => game.player1 === socket || game.player2 === socket);
-                if (game) {
-                    console.log("inside makemove")
-                    game.makeMove(socket, message.payload.move);
-                }
-            }
+        if (!availableGame) {
+          const game = new Game(
+            gameFromDb?.whitePlayerId!,
+            gameFromDb?.blackPlayerId!,
+            gameFromDb.id,
+            gameFromDb.startAt
+          );
+          game.seedMoves(gameFromDb?.moves || [])
+          this.games.push(game);
+          availableGame = game;
+        }
 
-            if (message.type === JOIN_GAME) {
-                if (message.payload?.gameId) {
-                    const { payload: { gameId } } = message
-                    const availableGame = this.games.find(game => game.gameId === gameId)
-                    if (availableGame) {
-                        const { player1, player2, gameId, board } = availableGame
-                        if (player1 && player2) {
-                            socket.send(JSON.stringify({ type: "GAME_FULL" }))
-                            return;
-                        }
-                        if (!player1) {
-                            availableGame.player1 = socket
-                            player2?.send(JSON.stringify({ type: "OPPONENT_JOINED" }))
-                        }
-                        else if (!player2) {
-                            availableGame.player2 = socket
-                            player1?.send(JSON.stringify({ type: "OPPONENT_JOINED" }))
-                        }
-                        socket.send(JSON.stringify({
-                            type: "GAME_JOINED",
-                            payload: {
-                                gameId,
-                                board
-                            }
-                        }))
-                        return
-                    } else {
-                        const gameFromDb = await db.game.findUnique({
-                            where: { id: gameId, }, include: {
-                                moves: {
-                                    orderBy: {
-                                        moveNumber: "asc"
-                                    }
-                                },
-                            }
-                        })
-                        const game = new Game(socket, null);
-                        gameFromDb?.moves.forEach((move) => {
-                            game.board.move(move)
-                        })
-                        this.games.push(game);
-                        socket.send(JSON.stringify({
-                            type: "GAME_JOINED",
-                            payload: {
-                                gameId,
-                                board: game.board
-                            }
-                        }))
-                    }
-                }
-            }
-        })
-    }
+        console.log(availableGame.getPlayer1TimeConsumed());
+        console.log(availableGame.getPlayer2TimeConsumed());
+
+        user.socket.send(
+          JSON.stringify({
+            type: GAME_JOINED,
+            payload: {
+              gameId,
+              moves: gameFromDb.moves,
+              blackPlayer: {
+                id: gameFromDb.blackPlayer.id,
+                name: gameFromDb.blackPlayer.name,
+              },
+              whitePlayer: {
+                id: gameFromDb.whitePlayer.id,
+                name: gameFromDb.whitePlayer.name,
+              },
+              player1TimeConsumed: availableGame.getPlayer1TimeConsumed(),
+              player2TimeConsumed: availableGame.getPlayer2TimeConsumed(),
+            },
+          }),
+        );
+
+        SocketManager.getInstance().addUser(user, gameId);
+      }
+    });
+  }
 }

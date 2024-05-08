@@ -1,28 +1,16 @@
-import { useNavigate } from "react-router-dom"
-import { Button } from "../components/Button";
+import { PlayCard } from '@/components/Card';
 
 export const Landing = () => {
-    const navigate = useNavigate();
-    return <div className="flex justify-center">
-        <div className="pt-8 max-w-screen-lg">
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="flex justify-center">
-                    <img src={"/chessboard.jpeg"} className="max-w-96" />
-                </div>
-                <div className="pt-16">
-                    <div className="flex justify-center">
-                        <h1 className="text-4xl font-bold text-white">Play chess online on the #2 Site!</h1>
-                    </div>
-
-                    <div className="mt-8 flex justify-center">
-                        <Button onClick={() => {
-                            navigate("/game")
-                        }} >
-                            Play Online
-                        </Button>
-                    </div>    
-                </div>
-            </div>
-        </div>
+  return (
+    <div className="max-w-full h-screen chess-board mt-0">
+      <div className="flex flex-col md:flex-row w-full md:w-3/4 max-w-screen-lg mx-auto gap-x-4 p-4">
+        <img
+          className="rounded-md w-full md:h-3/4  hidden md:block"
+          src="https://res.cloudinary.com/dcugqfvvg/image/upload/v1713647295/standardboard.1d6f9426_asqzum.png"
+          alt="chess-board"
+        />
+        <PlayCard />
+      </div>
     </div>
-}
+  );
+};
